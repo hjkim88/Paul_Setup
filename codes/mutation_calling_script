@@ -1,0 +1,148 @@
+######
+### This script is for WES (Whole Exome Sequencing) data
+### It uses GATK Docker Container to analyze WES data for mutation calling
+### It starts with a FASTQ file, does alignment and necessary pre-processings,
+### and finally calls mutations and save the results in VCF format
+### FASTQ -> BAM -> VCF
+### This is a workflow on Windows PowerShell in Windows OS
+### This is a workflow for mouse data
+###
+### Running GATK on Docker: https://gatk.broadinstitute.org/hc/en-us/articles/360035889991--How-to-Run-GATK-in-a-Docker-container
+### Data pre-processing for GATK mutation calling: https://gatk.broadinstitute.org/hc/en-us/articles/360035535912
+### GATK mutation calling: https://gatk.broadinstitute.org/hc/en-us/articles/360035894731-Somatic-short-variant-discovery-SNVs-Indels-
+###
+### mouse variants known sites: ftp://ftp.ensembl.org/pub/release-99/variation/vcf/mus_musculus/mus_musculus.vcf.gz
+### GRCm38.p6 - mm10 (Ensembl Release 99 - Jan 2020)
+###
+### When you start the computer, Docker will be starting automatically. If not, please start the Docker application.
+### If Docker is running in background, then start the Windows PowerShell application.
+### And type the commands below (set your parameters of your own).
+######
+
+### Install GATK on Docker - one time thing
+# docker pull broadinstitute/gatk
+
+### Set local data path
+### Your local drive path that will be mounted in the Docker container
+$local_data_path="E:/"
+
+### Run GATK Docker container
+docker run -v ${local_data_path}:/gatk/my_data -it broadinstitute/gatk:4.1.4.1
+
+### set parameters
+### change them accordingly to your data structure
+exp_fastq1=/gatk/my_data/Paul/WES_sample_FASTQ/042216HIGH_IGO_07978_C_9_S7_R1_001.fastq.gz
+exp_fastq2=/gatk/my_data/Paul/WES_sample_FASTQ/042216HIGH_IGO_07978_C_9_S7_R2_001.fastq.gz
+ctrl_fastq1=/gatk/my_data/Paul/WES_sample_FASTQ/042216TAIL_IGO_07978_C_7_S15_R1_001.fastq.gz
+ctrl_fastq2=/gatk/my_data/Paul/WES_sample_FASTQ/042216TAIL_IGO_07978_C_7_S15_R2_001.fastq.gz
+sample_name=042216
+reference=/gatk/my_data/Reference/mm10.fa
+known_sites=/gatk/my_data/Reference/mm10_chr.vcf.gz
+output_dir=/gatk/my_data/Paul/WES_sample_FASTQ/
+
+
+### Run if the reference FASTA file does not have a dictionary file
+### This is only for one-time use
+# ./gatk CreateSequenceDictionary -R ${reference}
+
+### Run if the reference FASTA file does not have a image file
+### This is only for one-time use
+# ./gatk BwaMemIndexImageCreator -I ${reference}
+
+### RUN if the vcf file does not have an index file
+### This is only for one-time use
+# ./gatk IndexFeatureFile -I ${known_sites}
+
+
+### Change the FASTQ files to unaligned BAM files
+./gatk FastqToSam -F1 ${exp_fastq1} -F2 ${exp_fastq2} -O ${output_dir}/${sample_name}_exp_unaligned.bam -SM ${sample_name}_exp
+./gatk FastqToSam -F1 ${ctrl_fastq1} -F2 ${ctrl_fastq2} -O ${output_dir}/${sample_name}_ctrl_unaligned.bam -SM ${sample_name}_ctrl
+
+### Run BWA for alignment
+./gatk BwaSpark -I ${output_dir}/${sample_name}_exp_unaligned.bam -O ${output_dir}/${sample_name}_exp_aligned.bam -R ${reference}
+./gatk BwaSpark -I ${output_dir}/${sample_name}_ctrl_unaligned.bam -O ${output_dir}/${sample_name}_ctrl_aligned.bam -R ${reference}
+
+### Merge unaligned BAM + aligned BAM
+./gatk MergeBamAlignment -R ${reference} --UNMAPPED_BAM ${output_dir}/${sample_name}_exp_unaligned.bam --ALIGNED_BAM ${output_dir}/${sample_name}_exp_aligned.bam -O ${output_dir}/${sample_name}_exp_merged.bam
+./gatk MergeBamAlignment -R ${reference} --UNMAPPED_BAM ${output_dir}/${sample_name}_ctrl_unaligned.bam --ALIGNED_BAM ${output_dir}/${sample_name}_ctrl_aligned.bam -O ${output_dir}/${sample_name}_ctrl_merged.bam
+
+### Mark PCR duplicates
+./gatk MarkDuplicates -I ${output_dir}/${sample_name}_exp_aligned.bam -O ${output_dir}/${sample_name}_exp_markdup.bam -M ${output_dir}/${sample_name}_exp_markdup.metrics
+./gatk MarkDuplicates -I ${output_dir}/${sample_name}_ctrl_aligned.bam -O ${output_dir}/${sample_name}_ctrl_markdup.bam -M ${output_dir}/${sample_name}_ctrl_markdup.metrics
+
+### Add read groups
+./gatk AddOrReplaceReadGroups -I ${output_dir}/${sample_name}_exp_markdup.bam -O ${output_dir}/${sample_name}_exp_rg.bam -LB ${sample_name}_exp -PL ${sample_name}_exp -PU ${sample_name}_exp -SM ${sample_name}_exp
+./gatk AddOrReplaceReadGroups -I ${output_dir}/${sample_name}_ctrl_markdup.bam -O ${output_dir}/${sample_name}_ctrl_rg.bam -LB ${sample_name}_ctrl -PL ${sample_name}_ctrl -PU ${sample_name}_ctrl -SM ${sample_name}_ctrl
+
+### Sort the BAM files in COORDINATE order
+./gatk SortSam -I ${output_dir}/${sample_name}_exp_rg.bam -O ${output_dir}/${sample_name}_exp_sorted.bam -SO coordinate
+./gatk SortSam -I ${output_dir}/${sample_name}_ctrl_rg.bam -O ${output_dir}/${sample_name}_ctrl_sorted.bam -SO coordinate
+
+### Build BAI index for the BAM files
+./gatk BuildBamIndex -I ${output_dir}/${sample_name}_exp_sorted.bam
+./gatk BuildBamIndex -I ${output_dir}/${sample_name}_ctrl_sorted.bam
+
+### Base recalibration
+./gatk BaseRecalibrator -I ${output_dir}/${sample_name}_exp_sorted.bam -R ${reference} --known-sites ${known_sites} -O ${output_dir}/${sample_name}_exp_recal.grp
+./gatk BaseRecalibrator -I ${output_dir}/${sample_name}_ctrl_sorted.bam -R ${reference} --known-sites ${known_sites} -O ${output_dir}/${sample_name}_ctrl_recal.grp
+
+### Apply the base reclibration to the BAM
+./gatk ApplyBQSR -R ${reference} -I ${output_dir}/${sample_name}_exp_sorted.bam --bqsr-recal-file ${output_dir}/${sample_name}_exp_recal.grp -O ${output_dir}/${sample_name}_exp_analysis_ready.bam
+./gatk ApplyBQSR -R ${reference} -I ${output_dir}/${sample_name}_ctrl_sorted.bam --bqsr-recal-file ${output_dir}/${sample_name}_ctrl_recal.grp -O ${output_dir}/${sample_name}_ctrl_analysis_ready.bam
+
+### Create Panel of Normals
+### ONE TIME THING
+### See this link for more details: https://gatk.broadinstitute.org/hc/en-us/articles/360035890631-Panel-of-Normals-PON-
+### It's very important to use normals that are as technically similar as possible to the tumor
+### Make the normal samples as analysis-ready BAM files as shown above
+### Then run Mutect2 in tumor-only mode for each normal sample: gatk Mutect2 -R reference.fasta -I normal1.bam -O normal1.vcf.gz
+### e.g., ./gatk Mutect2 -R ${reference} -I ${output_dir}/${sample_name}_ctrl_analysis_ready.bam -O ${output_dir}/${sample_name}_ctrl_analysis_ready.vcf.gz
+### Then do the followings to create the PoN(Panel of Normals)
+### For example, here, I created the PoN with 3 normal samples - it would be better to have more samples
+# normal1=/gatk/my_data/Paul/WES_sample_FASTQ/042216_ctrl_analysis_ready.vcf.gz
+# normal2=/gatk/my_data/Paul/WES_sample_FASTQ/041117-2_ctrl_analysis_ready.vcf.gz
+# normal3=/gatk/my_data/Paul/WES_sample_FASTQ/041117-5_ctrl_analysis_ready.vcf.gz
+# interval_list=/gatk/mydata/Reference/intervals.list
+# ./gatk GenomicsDBImport -R ${reference} -L ${interval_list} --genomicsdb-workspace-path pon_db -V ${normal1} -V ${normal2} -V ${normal3}
+# ./gatk CreateSomaticPanelOfNormals -R ${reference} -V gendb://pon_db -O ${output_dir}/pon.vcf.gz
+
+### Mutation calling
+### Here, germ line resource and panel of normals can be considered as options
+### If there are the inputs, the function will filter out the known germ line sites
+### and PoN (germ line resource of the specific tissue itself) since this is for somatic mutation calling.
+### When consider all the options to run the function it will be a very strict result.
+### Some says that it (putting additional options) also removes not only the False positives but also True positives - something to be aware.
+### If you want to put the known germ line sites, you could do like:
+### ./gatk Mutect2 -R ${reference} -I ${output_dir}/${sample_name}_exp_analysis_ready.bam -I ${output_dir}/${sample_name}_ctrl_analysis_ready.bam -normal ${sample_name}_ctrl --germline-resource ${known_sites} -O ${output_dir}/${sample_name}_mutect2.vcf.gz
+### The ${reference} is the vcf.gz file used in the base reclibration step
+### If you want to put the PoN info, you could do like:
+### ./gatk Mutect2 -R ${reference} -I ${output_dir}/${sample_name}_exp_analysis_ready.bam -I ${output_dir}/${sample_name}_ctrl_analysis_ready.bam -normal ${sample_name}_ctrl --panel-of-normals ${output_dir}/pon.vcf.gz -O ${output_dir}/${sample_name}_mutect2.vcf.gz
+### The ${output_dir}/pon.vcf.gz is the vcf.gz file generated by the "Create Panel of Normals" step above.
+### If you want to put both the known germ line sites and the PoN,
+### ./gatk Mutect2 -R ${reference} -I ${output_dir}/${sample_name}_exp_analysis_ready.bam -I ${output_dir}/${sample_name}_ctrl_analysis_ready.bam -normal ${sample_name}_ctrl --germline-resource ${known_sites} --panel-of-normals ${output_dir}/pon.vcf.gz -O ${output_dir}/${sample_name}_mutect2.vcf.gz
+### Default (No extra options):
+./gatk Mutect2 -R ${reference} -I ${output_dir}/${sample_name}_exp_analysis_ready.bam -I ${output_dir}/${sample_name}_ctrl_analysis_ready.bam -normal ${sample_name}_ctrl -O ${output_dir}/${sample_name}_mutect2.vcf.gz
+
+### For human data, there is an additional step to filter out contaminated candidates,
+### This will give you more accurate data, but it's an optional thing.
+### Anyway currently, there is no gnomAD data for mouse, so we can just leave this step out.
+### GetPileupSummaries -> CalculateContamination -> FilterMutectCalls
+
+### Remove all the BAM + other files that have been generated during the process
+### If you want to keep those files, do not run the following codes.
+rm ${output_dir}/${sample_name}_exp_unaligned.bam
+rm ${output_dir}/${sample_name}_ctrl_aligned.bam
+rm ${output_dir}/${sample_name}_exp_aligned.bam
+rm ${output_dir}/${sample_name}_ctrl_aligned.bam
+rm ${output_dir}/${sample_name}_exp_merged.bam
+rm ${output_dir}/${sample_name}_ctrl_merged.bam
+rm ${output_dir}/${sample_name}_exp_markdup.metrics
+rm ${output_dir}/${sample_name}_ctrl_markdup.metrics
+rm ${output_dir}/${sample_name}_exp_rg.bam
+rm ${output_dir}/${sample_name}_ctrl_rg.bam
+rm ${output_dir}/${sample_name}_exp_sorted.bam
+rm ${output_dir}/${sample_name}_ctrl_sorted.bam
+rm ${output_dir}/${sample_name}_exp_recal.grp
+rm ${output_dir}/${sample_name}_ctrl_recal.grp
+rm ${output_dir}/${sample_name}_exp_analysis_ready.bam
+rm ${output_dir}/${sample_name}_ctrl_analysis_ready.bam
